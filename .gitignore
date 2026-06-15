@@ -1,0 +1,14 @@
+# secrets
+config.json
+
+# generated / local state
+schedule_data.json
+sync.log
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

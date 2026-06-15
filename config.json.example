@@ -1,0 +1,4 @@
+{
+  "_note": "Copy to config.json and add your key. Register free at https://www.football-data.org/client/register",
+  "football_data_api_key": "YOUR_API_KEY_HERE"
+}

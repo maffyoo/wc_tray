@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+One-time patch: applies the complete BBC/ITV group-stage broadcast schedule
+sourced from Yahoo Sports / official ITV Media & BBC Sport release.
+Run once; subsequent daily syncs will layer on top of this via broadcasts.json.
+"""
+
+import json
+import os
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCHEDULE_FILE = os.path.join(SCRIPT_DIR, "schedule_data.json")
+BROADCASTS_FILE = os.path.join(SCRIPT_DIR, "broadcasts.json")
+
+# Complete group-stage broadcast schedule.
+# Keys use football-data.org exact team names (verified against schedule_data.json).
+KNOWN = {
+    "2026-06-14": {
+        "Germany vs Curaçao":        "ITV1",
+        "Netherlands vs Japan":       "ITV1",
+    },
+    "2026-06-15": {
+        "Ivory Coast vs Ecuador":     "BBC One",
+        "Sweden vs Tunisia":          "ITV1",
+        "Spain vs Cape Verde Islands":"ITV1",
+        "Belgium vs Egypt":           "BBC One",
+        "Saudi Arabia vs Uruguay":    "ITV1",
+    },
+    "2026-06-16": {
+        "Iran vs New Zealand":        "BBC One",
+        "France vs Senegal":          "BBC One",
+        "Iraq vs Norway":             "BBC One",
+    },
+    "2026-06-17": {
+        "Argentina vs Algeria":       "ITV1",
+        "Austria vs Jordan":          "BBC One",
+        "Portugal vs Congo DR":       "BBC One",
+        "England vs Croatia":         "ITV1",
+    },
+    "2026-06-18": {
+        "Ghana vs Panama":            "ITV1",
+        "Uzbekistan vs Colombia":     "BBC One",
+        "Czechia vs South Africa":    "BBC One",
+        "Switzerland vs Bosnia-Herzegovina": "ITV1",
+        "Canada vs Qatar":            "ITV1",
+    },
+    "2026-06-19": {
+        "Mexico vs South Korea":      "BBC One",   # Yahoo listed wrong opponent; channel confirmed BBC
+        "United States vs Australia": "BBC One",
+        "Scotland vs Morocco":        "ITV1",
+    },
+    "2026-06-20": {
+        "Brazil vs Haiti":            "ITV1",
+        "Turkey vs Paraguay":         "ITV1",
+        "Netherlands vs Sweden":      "BBC One",
+        "Germany vs Ivory Coast":     "ITV1",
+    },
+    "2026-06-21": {
+        "Ecuador vs Curaçao":         "BBC One",
+        "Tunisia vs Japan":           "BBC One",
+        "Spain vs Saudi Arabia":      "BBC One",
+        "Belgium vs Iran":            "ITV1",
+        "Uruguay vs Cape Verde Islands": "BBC One",
+    },
+    "2026-06-22": {
+        "New Zealand vs Egypt":       "ITV1",
+        "Argentina vs Austria":       "BBC One",
+        "France vs Iraq":             "BBC One",
+    },
+    "2026-06-23": {
+        "Norway vs Senegal":          "ITV1",
+        "Jordan vs Algeria":          "ITV1",
+        "Portugal vs Uzbekistan":     "ITV1",
+        "England vs Ghana":           "BBC One",
+    },
+    "2026-06-24": {
+        "Panama vs Croatia":          "BBC One",
+        "Colombia vs Congo DR":       "ITV1",
+        "Switzerland vs Canada":      "ITV1",
+        "Bosnia-Herzegovina vs Qatar":"ITV4",
+        "Morocco vs Haiti":           "BBC Two",
+        "Scotland vs Brazil":         "BBC One",
+    },
+    "2026-06-25": {
+        "Czechia vs Mexico":          "BBC One",
+        "South Africa vs South Korea":"BBC Two",
+        "Ecuador vs Germany":         "BBC One",
+        "Curaçao vs Ivory Coast":     "BBC Two",
+    },
+    "2026-06-26": {
+        "Tunisia vs Netherlands":     "BBC One",
+        "Japan vs Sweden":            "BBC Two",
+        "Turkey vs United States":    "ITV1",
+        "Paraguay vs Australia":      "ITV4",
+        "Norway vs France":           "ITV1",
+        "Senegal vs Iraq":            "ITV4",
+    },
+    "2026-06-27": {
+        "Uruguay vs Spain":           "ITV1",
+        "Cape Verde Islands vs Saudi Arabia": "ITV4",
+        "New Zealand vs Belgium":     "BBC One",
+        "Egypt vs Iran":              "BBC Two",
+        "Panama vs England":          "ITV1",
+        "Croatia vs Ghana":           "ITV4",
+    },
+    "2026-06-28": {
+        "Colombia vs Portugal":       "BBC One",
+        "Congo DR vs Uzbekistan":     "BBC Two",
+        "Jordan vs Argentina":        "BBC One",
+        "Algeria vs Austria":         "BBC Two",
+    },
+}
+
+FINISHED = {"FINISHED", "AWARDED", "CANCELLED", "POSTPONED"}
+
+
+def main():
+    with open(SCHEDULE_FILE) as f:
+        schedule = json.load(f)
+
+    updated = 0
+    for match in schedule["matches"]:
+        if match.get("status") in FINISHED:
+            match["broadcaster"] = None
+            continue
+        date = match.get("ukDate", "")
+        name = match.get("matchName", "")
+        channel = KNOWN.get(date, {}).get(name)
+        if channel:
+            match["broadcaster"] = channel
+            updated += 1
+        elif match.get("broadcaster") in (None, "TBC", "TBD"):
+            pass  # leave as-is; sync will fill in via wheresthematch scraping
+
+    with open(SCHEDULE_FILE, "w") as f:
+        json.dump(schedule, f, indent=2, ensure_ascii=False)
+
+    print(f"Patched {updated} broadcaster assignments into schedule_data.json")
+
+    # Also write a canonical broadcasts.json so future syncs preserve this data
+    canonical = {"_note": "Auto-generated from official ITV Media / BBC Sport release. Manual overrides go here too."}
+    canonical.update(KNOWN)
+    with open(BROADCASTS_FILE, "w") as f:
+        json.dump(canonical, f, indent=2, ensure_ascii=False)
+    print(f"Updated broadcasts.json with {sum(len(v) for v in KNOWN.values())} entries")
+
+
+if __name__ == "__main__":
+    main()
