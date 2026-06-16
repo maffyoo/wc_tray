@@ -173,7 +173,44 @@ class WorldCupApp(rumps.App):
             resp.raise_for_status()
             return {m["id"]: m for m in resp.json().get("matches", [])}
         except Exception:
-            return {}
+            return None  # None signals failure — caller should keep stale cache
+
+    def _persist_finished_scores(self):
+        """Write final scores for newly-finished games back to schedule_data.json.
+        Ensures scores survive a tray restart before the next 06:00 sync."""
+        updates = {}
+        for m in self._all_matches:
+            if m.get("status") in FINISHED:
+                continue  # already written by a previous sync or persist
+            ld = self._live_cache.get(m["id"])
+            if not ld or ld.get("status") not in FINISHED:
+                continue
+            ft = (ld.get("score") or {}).get("fullTime") or {}
+            hs, aws = ft.get("home"), ft.get("away")
+            if hs is None or aws is None:
+                continue
+            updates[m["id"]] = {"status": ld["status"], "score": {"home": hs, "away": aws}}
+
+        if not updates:
+            return
+
+        for m in self._all_matches:
+            if m["id"] in updates:
+                m["status"] = updates[m["id"]]["status"]
+                m["score"]  = updates[m["id"]]["score"]
+
+        try:
+            with open(SCHEDULE_FILE) as f:
+                data = json.load(f)
+            by_id = {m["id"]: m for m in data.get("matches", [])}
+            for mid, upd in updates.items():
+                if mid in by_id:
+                    by_id[mid]["status"] = upd["status"]
+                    by_id[mid]["score"]  = upd["score"]
+            with open(SCHEDULE_FILE, "w") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
 
     # ── Refresh paths ─────────────────────────────────────────────────
 
@@ -192,15 +229,18 @@ class WorldCupApp(rumps.App):
 
         day_matches = [m for m in self._all_matches if m.get("ukDate") == viewing_str]
 
-        # Fetch live data for today's non-finished matches
-        if self._viewing == today:
-            ids = [m["id"] for m in day_matches if m.get("status") not in FINISHED]
-            self._live_cache = self._fetch_live(ids)
-        else:
-            # Also keep title bar current even when browsing another day
+        # Fetch live data — always include the viewed day's non-finished matches so
+        # cross-midnight games (scheduled yesterday, still running) stay in the cache.
+        ids = [m["id"] for m in day_matches if m.get("status") not in FINISHED]
+        if self._viewing != today:
+            # Also include today's matches so the title bar stays current.
             today_ids = [m["id"] for m in self._all_matches
                          if m.get("ukDate") == today_str and m.get("status") not in FINISHED]
-            self._live_cache = self._fetch_live(today_ids)
+            ids = list(set(ids + today_ids))
+        result = self._fetch_live(ids)
+        if result is not None:
+            self._live_cache = result
+            self._persist_finished_scores()
 
         self._update_title(today_str)
         self._set_poll_rate()
@@ -216,10 +256,12 @@ class WorldCupApp(rumps.App):
     # ── Title bar ─────────────────────────────────────────────────────
 
     def _update_title(self, today_str):
+        # Use only games we've freshly fetched live data for — avoids stale schedule
+        # statuses and correctly handles cross-midnight games scheduled on a prior day.
         live_now = [
             m for m in self._all_matches
-            if m.get("ukDate") == today_str
-            and (self._live_cache.get(m["id"], {}).get("status") or m.get("status")) in LIVE
+            if m["id"] in self._live_cache
+            and (self._live_cache[m["id"]].get("status") or m.get("status")) in LIVE
         ]
         if not live_now:
             self.title = "⚽"
