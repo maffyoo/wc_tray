@@ -8,7 +8,11 @@ from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import objc
-from AppKit import NSView, NSSegmentedControl, NSMenuItem, NSMakeRect
+from AppKit import (
+    NSView, NSSegmentedControl, NSMenuItem, NSMakeRect,
+    NSImage, NSFont, NSFontAttributeName, NSTextAttachment,
+)
+from Foundation import NSAttributedString, NSMutableAttributedString
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE  = os.path.join(SCRIPT_DIR, "config.json")
@@ -27,6 +31,22 @@ BROADCASTER_SHORT = {
     "BBC One": "BBC1", "BBC Two": "BBC2", "BBC iPlayer": "iPlayer",
     "ITV1": "ITV1", "ITV2": "ITV2", "ITV4": "ITV4", "ITVX": "ITVX",
 }
+
+LOGOS_DIR = os.path.join(SCRIPT_DIR, "logos")
+
+# Broadcasters we have a logo asset for — shown as an image instead of text.
+# Anything not listed here falls back to the BROADCASTER_SHORT text label.
+BROADCASTER_LOGO = {
+    "BBC One": os.path.join(LOGOS_DIR, "bbc_one.png"),
+    "BBC Two": os.path.join(LOGOS_DIR, "bbc_two.png"),
+    "ITV1":    os.path.join(LOGOS_DIR, "itv1.png"),
+    "ITV4":    os.path.join(LOGOS_DIR, "itv4.png"),
+}
+
+# Tabular row styling — a monospaced font keeps times/scores from jittering in
+# width as digits change, and reads more compactly than the default menu font.
+ROW_FONT    = NSFont.monospacedSystemFontOfSize_weight_(12, 0)  # NSFontWeightRegular
+LOGO_HEIGHT = 11
 
 FLAGS = {
     "Germany": "🇩🇪",  "Netherlands": "🇳🇱",  "Japan": "🇯🇵",
@@ -127,6 +147,52 @@ class NavView(NSView):
 
         # Rebuild from cache — no network call so it's instant
         app._rebuild_from_cache()
+
+
+# ── Logo-attachment row styling ────────────────────────────────────────────
+# Logos are inlined into the row's attributedTitle via NSTextAttachment —
+# native NSMenuItem rendering (hover highlight, sizing) instead of a custom
+# view, and the image sits glued to the text it replaces.
+
+_logo_image_cache      = {}
+_logo_attachment_cache = {}
+
+
+def _logo_image(path):
+    img = _logo_image_cache.get(path)
+    if img is None:
+        img = NSImage.alloc().initByReferencingFile_(path)
+        _logo_image_cache[path] = img
+    return img
+
+
+def _logo_attachment_string(path):
+    """An NSAttributedString holding just the broadcaster logo, sized to
+    LOGO_HEIGHT and vertically centered on the row's cap-height band."""
+    cached = _logo_attachment_cache.get(path)
+    if cached is not None:
+        return cached
+
+    img  = _logo_image(path)
+    size = img.size()
+    h    = LOGO_HEIGHT
+    w    = h * (size.width / size.height) if size.height else h
+
+    attachment = NSTextAttachment.alloc().init()
+    attachment.setImage_(img)
+    attachment.setBounds_(NSMakeRect(0, (ROW_FONT.capHeight() - h) / 2.0, w, h))
+
+    result = NSAttributedString.attributedStringWithAttachment_(attachment)
+    _logo_attachment_cache[path] = result
+    return result
+
+
+def _styled_row(text, logo_path=None):
+    attr = NSMutableAttributedString.alloc().initWithString_attributes_(text, {NSFontAttributeName: ROW_FONT})
+    if logo_path:
+        attr.appendAttributedString_(NSAttributedString.alloc().initWithString_(THIN))
+        attr.appendAttributedString_(_logo_attachment_string(logo_path))
+    return attr
 
 
 # ── Main app ───────────────────────────────────────────────────────────────
@@ -297,6 +363,16 @@ class WorldCupApp(rumps.App):
     def _mi(self, label, cb=None):
         return rumps.MenuItem(label, callback=cb if cb else (lambda _: None))
 
+    def _match_item(self, m):
+        """Builds the menu row for a match. Always uses the compact monospaced
+        row style; swaps the trailing broadcaster text for its logo when we
+        have one on file."""
+        logo_path = BROADCASTER_LOGO.get(m.get("broadcaster") or "")
+        text = self._fmt(m, with_broadcaster=not logo_path)
+        mi = self._mi(text)
+        mi._menuitem.setAttributedTitle_(_styled_row(text, logo_path))
+        return mi
+
     def _rebuild_menu(self, day_matches, live_data, today: date):
         viewing = self._viewing
 
@@ -329,13 +405,13 @@ class WorldCupApp(rumps.App):
             if live_ms:
                 items.append(self._mi("  🔴 LIVE"))
                 for m in live_ms:
-                    items.append(self._mi(self._fmt(m)))
+                    items.append(self._match_item(m))
                 items.append(None)
 
             if finished_ms:
                 items.append(self._mi("  ✓ RESULTS"))
                 for m in finished_ms:
-                    items.append(self._mi(self._fmt(m)))
+                    items.append(self._match_item(m))
                 if upcoming_ms:
                     items.append(None)
 
@@ -343,7 +419,7 @@ class WorldCupApp(rumps.App):
                 if not finished_ms:
                     items.append(self._mi("  ○ UPCOMING"))
                 for m in upcoming_ms:
-                    items.append(self._mi(self._fmt(m)))
+                    items.append(self._match_item(m))
 
         # Footer
         items.append(None)
@@ -369,7 +445,7 @@ class WorldCupApp(rumps.App):
 
     # ── Match formatting ──────────────────────────────────────────────
 
-    def _fmt(self, m):
+    def _fmt(self, m, with_broadcaster=True):
         home_full = m.get("home", "?")
         away_full = m.get("away", "?")
         home = m.get("homeShort") or home_full
@@ -383,12 +459,14 @@ class WorldCupApp(rumps.App):
         aws    = score.get("away")
         status = (m.get("status") or "SCHEDULED").upper()
 
-        raw_bc = m.get("broadcaster") or ""
-        bc = BROADCASTER_SHORT.get(raw_bc, raw_bc)
-        bc_str = f"  {bc}" if bc else ""
+        bc_str = ""
+        if with_broadcaster:
+            raw_bc = m.get("broadcaster") or ""
+            bc = BROADCASTER_SHORT.get(raw_bc, raw_bc)
+            bc_str = f"{THIN}{bc}" if bc else ""
 
         if status in FINISHED:
-            return f"  {hf} {home}  {hs}–{aws}  {af} {away}{bc_str}"
+            return f" {hf} {home}{THIN}{hs}–{aws}{THIN}{af} {away}{bc_str}"
 
         if status in LIVE:
             minute = m.get("minute")
@@ -400,11 +478,11 @@ class WorldCupApp(rumps.App):
             else:
                 clk = "●"
             s = f"{hs}–{aws}" if hs is not None else "·–·"
-            return f"  ● {clk}  {hf} {home}  {s}  {af} {away}{bc_str}"
+            return f" ●{THIN}{clk}{THIN}{hf} {home}{THIN}{s}{THIN}{af} {away}{bc_str}"
 
         # Upcoming
         t = m.get("ukTime", "--:--")
-        return f"  {t}  {hf} {home}  ·–·  {af} {away}{bc_str}"
+        return f" {t}{THIN}{hf} {home}{THIN}·–·{THIN}{af} {away}{bc_str}"
 
 
 if __name__ == "__main__":
