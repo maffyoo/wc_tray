@@ -149,7 +149,7 @@ def _channel_from_alt(alt_text):
     for pattern, canonical in CHANNEL_PATTERNS:
         if pattern.fullmatch(name):
             return canonical
-    return name if detect_channel(name) else None
+    return detect_channel(name)
 
 
 def scrape_wheresthematch(existing_by_name):
@@ -160,10 +160,13 @@ def scrape_wheresthematch(existing_by_name):
       - kickoff from <meta itemprop="startDate">
       - channels from <td class="channel-details"> img alt texts
     Only assigns broadcasters to non-finished matches.
-    Returns {date_str: {match_name: broadcaster}}
+    Returns:
+      broadcaster_data: {date_str: {match_name: broadcaster}}
+      teams_by_slot:    {(date_str, time_str): (home, away)} for resolving TBD fixtures
     """
     log(f"Scraping {WTM_URL} ...")
     results = {}
+    teams_by_slot = {}
     upcoming = {k: v for k, v in existing_by_name.items() if v["status"] not in FINISHED}
 
     try:
@@ -171,7 +174,7 @@ def scrape_wheresthematch(existing_by_name):
         resp.raise_for_status()
     except Exception as e:
         log(f"  fetch failed: {e}")
-        return results
+        return results, teams_by_slot
 
     soup = BeautifulSoup(resp.text, "lxml")
 
@@ -182,6 +185,8 @@ def scrape_wheresthematch(existing_by_name):
         # Match name
         name_meta = row.find("meta", attrs={"itemprop": "name"})
         wtm_name = name_meta["content"] if name_meta else ""
+        if not wtm_name:
+            continue
 
         # Kickoff UTC
         date_meta = row.find("meta", attrs={"itemprop": "startDate"})
@@ -193,8 +198,18 @@ def scrape_wheresthematch(existing_by_name):
             utc_dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
             uk_dt = utc_dt.astimezone(UK_TZ)
             date_str = uk_dt.strftime("%Y-%m-%d")
+            # WTM labels UK (BST) times as UTC, so the raw "UTC" hour matches
+            # entry["ukTime"] directly — don't apply another +1h conversion.
+            time_str = utc_dt.strftime("%H:%M")
         except (ValueError, AttributeError):
             date_str = None
+            time_str = None
+
+        # Always capture team names by slot — WTM uses "A v B", we store (A, B).
+        # This lets us resolve TBD fixtures even when the football-data API lags.
+        parts = [p.strip() for p in wtm_name.split(" v ", 1)]
+        if len(parts) == 2 and all(parts) and date_str and time_str:
+            teams_by_slot.setdefault((date_str, time_str), (parts[0], parts[1]))
 
         # Channels from img alt attributes in channel-details td
         channel_td = row.find("td", class_="channel-details")
@@ -206,24 +221,26 @@ def scrape_wheresthematch(existing_by_name):
                 if ch:
                     channels.append(ch)
 
-        if not channels or not wtm_name:
+        if not channels:
             continue
 
         best = _best_channel(channels)
         if not best:
             continue
 
-        # Match to known fixture using fuzzy team name matching
+        # Match by team name; fall back to kickoff slot for TBD fixtures
         for key, entry in upcoming.items():
             if date_str and entry["ukDate"] != date_str:
                 continue
-            if _fuzzy_team_match(wtm_name, key):
+            if _fuzzy_team_match(wtm_name, key) or (
+                time_str and entry["ukTime"] == time_str and entry["home"] == "TBD"
+            ):
                 results.setdefault(entry["ukDate"], {})[key] = best
                 break
 
     count = sum(len(v) for v in results.values())
     log(f"  Found {count} broadcast assignments")
-    return results
+    return results, teams_by_slot
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +304,7 @@ def main():
         existing_by_name[match_name] = entry
 
     # Broadcaster lookup — only for non-finished matches
-    wtm_data = scrape_wheresthematch(existing_by_name)
+    wtm_data, wtm_by_slot = scrape_wheresthematch(existing_by_name)
     manual = load_manual_broadcasts()
     def real_channel(val):
         """Return val only if it's a real channel name, not a placeholder."""
@@ -315,6 +332,22 @@ def main():
         entry["broadcaster"] = broadcaster
         if broadcaster:
             assigned += 1
+
+    # Resolve TBD team names from WTM slot data — runs after broadcaster assignment
+    # so the "TBD vs TBD" key still works for the wtm_data lookup above.
+    resolved = 0
+    for entry in matches_out:
+        if entry["home"] != "TBD" and entry["away"] != "TBD":
+            continue
+        slot = (entry["ukDate"], entry["ukTime"])
+        if slot in wtm_by_slot:
+            h, a = wtm_by_slot[slot]
+            entry["home"] = entry["homeShort"] = h
+            entry["away"] = entry["awayShort"] = a
+            entry["matchName"] = f"{h} vs {a}"
+            resolved += 1
+    if resolved:
+        log(f"  Resolved {resolved} TBD team name(s) from wheresthematch.com")
 
     schedule = {
         "last_updated": datetime.now(timezone.utc).isoformat(),
