@@ -8,6 +8,7 @@ from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import objc
+from bracket_window import open_bracket_window
 from AppKit import (
     NSView, NSSegmentedControl, NSMenuItem, NSMakeRect,
     NSImage, NSFont, NSFontAttributeName, NSTextAttachment,
@@ -426,6 +427,7 @@ class WorldCupApp(rumps.App):
         updated = datetime.now(UK_TZ).strftime("%H:%M")
         items.append(self._mi(f"  Updated {updated}"))
         items.append(self._mi("  Refresh", self.refresh))
+        items.append(self._mi("  🏆 Bracket", lambda _: open_bracket_window()))
         items.append(None)
         items.append(self._mi("  Quit", lambda _: rumps.quit_application()))
 
