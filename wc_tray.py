@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import objc
-from bracket_window import open_bracket_window
+from bracket_window import open_bracket_window, refresh_bracket_window
 from AppKit import (
     NSView, NSSegmentedControl, NSMenuItem, NSMakeRect,
     NSImage, NSFont, NSFontAttributeName, NSTextAttachment,
@@ -312,6 +312,7 @@ class WorldCupApp(rumps.App):
         self._update_title(today_str)
         self._set_poll_rate()
         self._rebuild_menu(day_matches, self._live_cache, today)
+        refresh_bracket_window()
 
     def _rebuild_from_cache(self):
         """Fast rebuild using cached live data — called by nav buttons."""

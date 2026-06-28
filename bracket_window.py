@@ -122,6 +122,7 @@ class _BracketWindowController(NSObject):
             window.contentView().bounds(), cfg
         )
         webview.setAutoresizingMask_(2 | 16)   # NSViewWidthSizable | NSViewHeightSizable
+        cfg.userContentController().addScriptMessageHandler_name_(self, "refresh")
         webview.loadHTMLString_baseURL_(content, None)
 
         window.contentView().addSubview_(webview)
@@ -131,7 +132,22 @@ class _BracketWindowController(NSObject):
         self._window  = window
         self._webview = webview
 
+    def refresh(self):
+        """Reload bracket from disk and regenerate SVG in the existing webview."""
+        if self._webview is None:
+            return
+        bracket = _load_bracket()
+        content = _build_html(bracket)
+        self._webview.loadHTMLString_baseURL_(content, None)
+
+    def userContentController_didReceiveScriptMessage_(self, _controller, message):
+        if message.name() == "refresh":
+            self.refresh()
+
     def windowWillClose_(self, _notification):
+        if self._webview is not None:
+            self._webview.configuration().userContentController() \
+                .removeScriptMessageHandlerForName_("refresh")
         self._window  = None
         self._webview = None
 
@@ -145,6 +161,12 @@ def open_bracket_window():
     if _controller is None:
         _controller = _BracketWindowController.alloc().init()
     _controller.open()
+
+
+def refresh_bracket_window():
+    """Refresh bracket data if the window is currently open."""
+    if _controller is not None:
+        _controller.refresh()
 
 
 # ── Data ───────────────────────────────────────────────────────────────────────
@@ -402,6 +424,23 @@ html, body {
 .tph { fill: var(--muted);  font-size: 9.5px; font-weight: 500;
        text-transform: uppercase; letter-spacing: .06em; }
 .mdt { fill: var(--tbd);    font-size: 9px; }
+
+/* Refresh button */
+.toolbar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: flex-end;
+  padding: 8px 16px 6px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.btn-refresh {
+  background: none; border: 1px solid var(--border);
+  color: var(--fg-dim); border-radius: 6px;
+  padding: 3px 10px; font-size: 11px; cursor: pointer;
+  font-family: -apple-system, sans-serif;
+}
+.btn-refresh:hover { background: var(--surface); color: var(--fg); }
 """
 
 
@@ -417,6 +456,9 @@ def _build_html(bracket: dict) -> str:
 <style>{_CSS}</style>
 </head>
 <body>
+<div class="toolbar">
+  <button class="btn-refresh" onclick="window.webkit.messageHandlers.refresh.postMessage(null)">↻ Refresh</button>
+</div>
 <div class="wrap">
 {svg}
 </div>
