@@ -284,6 +284,17 @@ def main():
         ft = score.get("fullTime", {"home": None, "away": None}) or {}
         status = m.get("status", "SCHEDULED")
 
+        score_entry = {"home": ft.get("home"), "away": ft.get("away")}
+        dur = score.get("duration")
+        if dur and dur != "REGULAR":
+            score_entry["duration"] = dur
+        et = score.get("extraTime") or {}
+        if et.get("home") is not None or et.get("away") is not None:
+            score_entry["et"] = {"home": et.get("home", 0), "away": et.get("away", 0)}
+        pens = score.get("penalties") or {}
+        if pens.get("home") is not None:
+            score_entry["pens"] = {"home": pens["home"], "away": pens["away"]}
+
         entry = {
             "id": m["id"],
             "utcDate": m["utcDate"],
@@ -298,7 +309,7 @@ def main():
             "awayShort": away_short,
             "matchName": match_name,
             "broadcaster": None,
-            "score": {"home": ft.get("home"), "away": ft.get("away")},
+            "score": score_entry,
         }
         matches_out.append(entry)
         existing_by_name[match_name] = entry

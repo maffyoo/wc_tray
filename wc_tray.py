@@ -46,7 +46,8 @@ BROADCASTER_LOGO = {
 
 # Tabular row styling — a monospaced font keeps times/scores from jittering in
 # width as digits change, and reads more compactly than the default menu font.
-ROW_FONT    = NSFont.monospacedSystemFontOfSize_weight_(12, 0)  # NSFontWeightRegular
+ROW_FONT    = NSFont.monospacedSystemFontOfSize_weight_(12, 0)    # NSFontWeightRegular
+BOLD_FONT   = NSFont.monospacedSystemFontOfSize_weight_(12, 0.4)  # NSFontWeightBold
 LOGO_HEIGHT = 11
 
 FLAGS = {
@@ -88,6 +89,50 @@ THIN = " "   # thin space — saves width in the title bar vs a full space
 
 def _flag(name):
     return FLAGS.get(name, "")
+
+
+def _score_parts(score):
+    """Return (sh, sa, suffix) for a score dict.
+    sh/sa are the displayed per-team scores; suffix is '' | 'aet' | '(X-Yp)'.
+    For penalties: sh/sa are the pre-shootout score (level).
+    For extra time: sh/sa are the final score including ET goals."""
+    if not score:
+        return None, None, ""
+    sh_raw = score.get("home")
+    sa_raw = score.get("away")
+    et = score.get("et") or {}
+    pens = score.get("pens") or {}
+    duration = score.get("duration") or "REGULAR"
+
+    if pens:
+        ph, pa = pens["home"], pens["away"]
+        # football-data.org v4 embeds penalty goals in fullTime; subtract to get pre-shootout score
+        pre_h = sh_raw - ph if sh_raw is not None else None
+        pre_a = sa_raw - pa if sa_raw is not None else None
+        return pre_h, pre_a, f"({ph}-{pa}p)"
+    if et.get("home") is not None or duration == "EXTRA_TIME":
+        # fullTime already includes ET goals — return as-is
+        return sh_raw, sa_raw, "aet"
+    return sh_raw, sa_raw, ""
+
+
+def _winner_side(score):
+    """Return 'home', 'away', or None based on a stored score dict."""
+    if not score:
+        return None
+    sh = score.get("home")
+    sa = score.get("away")
+    if sh is None or sa is None:
+        return None
+    pens = score.get("pens") or {}
+    ph, pa = pens.get("home"), pens.get("away")
+    if ph is not None and pa is not None:
+        if ph > pa: return "home"
+        if pa > ph: return "away"
+        return None
+    if sh > sa: return "home"
+    if sa > sh: return "away"
+    return None
 
 
 def _day_label(d: date, today: date) -> str:
@@ -196,6 +241,50 @@ def _styled_row(text, logo_path=None):
     return attr
 
 
+def _styled_row_result(m, logo_path=None):
+    """Attributed row for a finished match — winner's name is bold."""
+    home_full = m.get("home", "?")
+    away_full = m.get("away", "?")
+    home  = m.get("homeShort") or home_full
+    away  = m.get("awayShort") or away_full
+    hf    = _flag(home_full)
+    af    = _flag(away_full)
+    score = m.get("score") or {}
+    sh, sa, suf = _score_parts(score)
+    score_str   = f"{sh}–{sa}" if sh is not None else "?–?"
+    if suf:
+        score_str += f"{THIN}{suf}"
+    win = _winner_side(score)
+
+    bc_str = ""
+    if not logo_path:
+        raw_bc = m.get("broadcaster") or ""
+        bc = BROADCASTER_SHORT.get(raw_bc, raw_bc)
+        bc_str = f"{THIN}{bc}" if bc else ""
+
+    reg  = {NSFontAttributeName: ROW_FONT}
+    bld  = {NSFontAttributeName: BOLD_FONT}
+    attr = NSMutableAttributedString.alloc().init()
+
+    def ap(s, bold=False):
+        attr.appendAttributedString_(
+            NSAttributedString.alloc().initWithString_attributes_(s, bld if bold else reg)
+        )
+
+    ap(f" {hf} ")
+    ap(home, bold=(win == "home"))
+    ap(f"{THIN}{score_str}{THIN}")
+    ap(f"{af} ")
+    ap(away, bold=(win == "away"))
+    if bc_str:
+        ap(bc_str)
+    if logo_path:
+        attr.appendAttributedString_(NSAttributedString.alloc().initWithString_(THIN))
+        attr.appendAttributedString_(_logo_attachment_string(logo_path))
+
+    return attr
+
+
 # ── Main app ───────────────────────────────────────────────────────────────
 
 class WorldCupApp(rumps.App):
@@ -252,11 +341,22 @@ class WorldCupApp(rumps.App):
             ld = self._live_cache.get(m["id"])
             if not ld or ld.get("status") not in FINISHED:
                 continue
-            ft = (ld.get("score") or {}).get("fullTime") or {}
+            raw = ld.get("score") or {}
+            ft = raw.get("fullTime") or {}
             hs, aws = ft.get("home"), ft.get("away")
             if hs is None or aws is None:
                 continue
-            updates[m["id"]] = {"status": ld["status"], "score": {"home": hs, "away": aws}}
+            score_entry = {"home": hs, "away": aws}
+            dur = raw.get("duration")
+            if dur and dur != "REGULAR":
+                score_entry["duration"] = dur
+            et = raw.get("extraTime") or {}
+            if et.get("home") is not None or et.get("away") is not None:
+                score_entry["et"] = {"home": et.get("home", 0), "away": et.get("away", 0)}
+            pens = raw.get("penalties") or {}
+            if pens.get("home") is not None:
+                score_entry["pens"] = {"home": pens["home"], "away": pens["away"]}
+            updates[m["id"]] = {"status": ld["status"], "score": score_entry}
 
         if not updates:
             return
@@ -366,13 +466,14 @@ class WorldCupApp(rumps.App):
         return rumps.MenuItem(label, callback=cb if cb else (lambda _: None))
 
     def _match_item(self, m):
-        """Builds the menu row for a match. Always uses the compact monospaced
-        row style; swaps the trailing broadcaster text for its logo when we
-        have one on file."""
         logo_path = BROADCASTER_LOGO.get(m.get("broadcaster") or "")
-        text = self._fmt(m, with_broadcaster=not logo_path)
-        mi = self._mi(text)
-        mi._menuitem.setAttributedTitle_(_styled_row(text, logo_path))
+        status    = (m.get("status") or "").upper()
+        text      = self._fmt(m, with_broadcaster=not logo_path)
+        mi        = self._mi(text)
+        if status in FINISHED:
+            mi._menuitem.setAttributedTitle_(_styled_row_result(m, logo_path))
+        else:
+            mi._menuitem.setAttributedTitle_(_styled_row(text, logo_path))
         return mi
 
     def _rebuild_menu(self, day_matches, live_data, today: date):
@@ -383,11 +484,18 @@ class WorldCupApp(rumps.App):
         for m in day_matches:
             ld     = live_data.get(m["id"], {})
             status = ld.get("status") or m.get("status", "SCHEDULED")
-            ft     = (ld.get("score") or {}).get("fullTime") or m.get("score") or {}
+            # For live games use the current live fullTime score (no pens yet).
+            # For finished/scheduled games keep the stored score intact so that
+            # any duration/et/pens fields are preserved.
+            if status in LIVE:
+                live_ft = (ld.get("score") or {}).get("fullTime") or {}
+                score = {"home": live_ft.get("home"), "away": live_ft.get("away")}
+            else:
+                score = m.get("score") or {}
             enriched.append({
                 **m,
                 "status":     status,
-                "score":      {"home": ft.get("home"), "away": ft.get("away")},
+                "score":      score,
                 "minute":     ld.get("minute"),
                 "injuryTime": ld.get("injuryTime"),
             })
@@ -458,8 +566,6 @@ class WorldCupApp(rumps.App):
         af  = _flag(away_full)
 
         score  = m.get("score") or {}
-        hs     = score.get("home")
-        aws    = score.get("away")
         status = (m.get("status") or "SCHEDULED").upper()
 
         bc_str = ""
@@ -469,9 +575,15 @@ class WorldCupApp(rumps.App):
             bc_str = f"{THIN}{bc}" if bc else ""
 
         if status in FINISHED:
-            return f" {hf} {home}{THIN}{hs}–{aws}{THIN}{af} {away}{bc_str}"
+            sh, sa, suf = _score_parts(score)
+            s = f"{sh}–{sa}" if sh is not None else "?–?"
+            if suf:
+                s += f"{THIN}{suf}"
+            return f" {hf} {home}{THIN}{s}{THIN}{af} {away}{bc_str}"
 
         if status in LIVE:
+            hs  = score.get("home")
+            aws = score.get("away")
             minute = m.get("minute")
             inj    = m.get("injuryTime")
             if status in HALFTIMES:

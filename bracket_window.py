@@ -184,7 +184,61 @@ def _load_bracket():
         ms = [m for m in matches if m.get("stage") == stage]
         ms.sort(key=lambda m: m.get("utcDate", ""))
         bracket[stage] = ms
+
+    # Reorder R32 so consecutive pairs (0,1), (2,3), ... connect to the
+    # correct R16 slot. Date order doesn't guarantee bracket order: e.g.
+    # Brazil vs Japan (R32[1] by date) was drawn into a different R16 slot
+    # than Canada vs Morocco feeds into, so connectors pointed to the wrong
+    # matches. We trace each known R16 team back to their R32 match.
+    if bracket.get("LAST_32") and bracket.get("LAST_16"):
+        bracket["LAST_32"] = _order_r32_by_bracket(
+            bracket["LAST_32"], bracket["LAST_16"]
+        )
+
     return bracket
+
+
+def _order_r32_by_bracket(r32: list, r16: list) -> list:
+    """Reorder r32 so pairs (0,1),(2,3),... each feed the matching r16 slot.
+
+    For every known (non-TBC) team in r16, find that team's r32 match and
+    place it at the correct position. Unknown slots are filled with remaining
+    r32 matches in original date order.
+    """
+    _tbc = {"TBC", "TBD", ""}
+    n = len(r32)
+    ordered: list = [None] * n
+    used_ids: set = set()
+
+    def find_r32_for(team: str):
+        for m in r32:
+            if m["id"] in used_ids:
+                continue
+            if m.get("home") == team or m.get("away") == team:
+                return m
+        return None
+
+    for ri, r16m in enumerate(r16):
+        slot_h, slot_a = ri * 2, ri * 2 + 1
+        if slot_a >= n:
+            break
+        for slot, side in ((slot_h, "home"), (slot_a, "away")):
+            team = r16m.get(side) or ""
+            if team in _tbc:
+                continue
+            m = find_r32_for(team)
+            if m is not None and ordered[slot] is None:
+                ordered[slot] = m
+                used_ids.add(m["id"])
+
+    remaining = [m for m in r32 if m["id"] not in used_ids]
+    ri = 0
+    for i in range(n):
+        if ordered[i] is None and ri < len(remaining):
+            ordered[i] = remaining[ri]
+            ri += 1
+
+    return [m for m in ordered if m is not None]
 
 
 # ── Layout helpers ─────────────────────────────────────────────────────────────
@@ -200,16 +254,57 @@ def _decided(m) -> bool:
     return m.get("status") in ("FINISHED", "AWARDED")
 
 
+def _score_parts(score):
+    """Return (sh, sa, suffix) for a score dict.
+    sh/sa are displayed per-team scores; suffix is '' | 'aet' | '(X-Yp)'.
+    Penalties: sh/sa are the pre-shootout (level) score.
+    Extra time: sh/sa are the final score including ET goals."""
+    if not score:
+        return None, None, ""
+    sh_raw = score.get("home")
+    sa_raw = score.get("away")
+    et    = score.get("et") or {}
+    pens  = score.get("pens") or {}
+    dur   = score.get("duration") or "REGULAR"
+
+    if pens:
+        ph, pa = pens["home"], pens["away"]
+        # football-data.org v4 embeds penalty goals in fullTime; subtract to get pre-shootout score
+        pre_h = sh_raw - ph if sh_raw is not None else None
+        pre_a = sa_raw - pa if sa_raw is not None else None
+        return pre_h, pre_a, f"({ph}-{pa}p)"
+    if et.get("home") is not None or dur == "EXTRA_TIME":
+        # fullTime already includes ET goals — return as-is
+        return sh_raw, sa_raw, "aet"
+    return sh_raw, sa_raw, ""
+
+
 def _winner_side(m):
     """Return 'home', 'away', or None."""
     if not _decided(m):
         return None
-    sh = (m.get("score") or {}).get("home")
-    sa = (m.get("score") or {}).get("away")
-    if sh is None or sa is None:
+    score = m.get("score") or {}
+    sh_raw = score.get("home")
+    sa_raw = score.get("away")
+    if sh_raw is None or sa_raw is None:
         return None
+
+    et   = score.get("et") or {}
+    pens = score.get("pens") or {}
+
+    # Determine effective score after ET (if any)
+    sh = sh_raw + et.get("home", 0)
+    sa = sa_raw + et.get("away", 0)
+
     if sh > sa: return "home"
     if sa > sh: return "away"
+
+    # Still level → winner decided by penalty shootout
+    if pens:
+        ph, pa = pens.get("home"), pens.get("away")
+        if ph is not None and pa is not None:
+            if ph > pa: return "home"
+            if pa > ph: return "away"
     return None
 
 
@@ -260,10 +355,10 @@ def _build_svg(bracket: dict) -> str:
         mx = col_x
         my = cy - MATCH_H / 2
 
-        sh    = (match.get("score") or {}).get("home")
-        sa    = (match.get("score") or {}).get("away")
-        win   = _winner_side(match)
-        done  = _decided(match)
+        score_data          = match.get("score") or {}
+        sh, sa, score_suf   = _score_parts(score_data)
+        win                 = _winner_side(match)
+        done                = _decided(match)
 
         # Box + divider
         parts.append(
@@ -295,8 +390,11 @@ def _build_svg(bracket: dict) -> str:
                 sc_cls = "sc sw" if win == side else "sc"
                 text_el(mx + MATCH_W - 8, label_y, str(score), sc_cls, anchor="end")
 
-        # Date/time label below the box for unplayed matches
-        if not done:
+        # Annotation below the box: ET/pens suffix for decided matches,
+        # date/time for upcoming matches.
+        if done and score_suf:
+            text_el(mx + MATCH_W / 2, my + MATCH_H + 13, score_suf, "mdt", anchor="middle")
+        elif not done:
             ukdate = match.get("ukDate", "")
             uktime = match.get("ukTime", "")
             if uktime:
